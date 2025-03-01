@@ -155,10 +155,9 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         Ltv = tv_loss(image.unsqueeze(0))
         loss += lambda_tv * Ltv
 
-        # NEW: Add VGG Loss
-        # Reshape images for VGG (need 3 channels and batch dimension)
-        pred_vgg = image.unsqueeze(0).permute(0, 2, 3, 1).repeat(1, 1, 1, 3)[:, :, :, :3]  # Convert to B,H,W,C and repeat to 3 channels
-        gt_vgg = gt_image.unsqueeze(0).permute(0, 2, 3, 1).repeat(1, 1, 1, 3)[:, :, :, :3]
+        # NEW: Add VGG Loss (Fixed)
+        pred_vgg = image.unsqueeze(0)  # [1, 3, H, W]
+        gt_vgg = gt_image.unsqueeze(0)  # [1, 3, H, W]
         Lvgg = vgg_loss(pred_vgg, gt_vgg)
         loss += lambda_vgg * Lvgg
 
@@ -225,7 +224,6 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 print("\n[ITER {}] Saving Checkpoint".format(iteration))
                 torch.save((gaussians.capture(), iteration), scene.model_path + "/chkpnt" + str(iteration) + ".pth")
 
-# Rest of the code remains unchanged
 def prepare_output_and_logger(args):    
     if not args.model_path:
         if os.getenv('OAR_JOB_ID'):
