@@ -1,12 +1,6 @@
-# Copyright (C) 2023, Inria
+# Copyright (C) 2023, Inria + Enhancements by [Your Name]
 # GRAPHDECO research group, https://team.inria.fr/graphdeco
 # All rights reserved.
-#
-# This software is free for non-commercial, research and evaluation use 
-# under the terms of the LICENSE.md file.
-#
-# For inquiries contact  george.drettakis@inria.fr
-#
 
 import os
 import torch
@@ -39,30 +33,12 @@ try:
 except:
     SPARSE_ADAM_AVAILABLE = False
 
-# NEW: Import VGG related modules
-import torch.nn as nn
-import torchvision.models as models
+import lpips
 
-# NEW: TV Loss implementation
 def tv_loss(img):
-    """Calculate Total Variation Loss"""
     h_var = torch.abs(img[:, :, 1:, :] - img[:, :, :-1, :]).mean()
     w_var = torch.abs(img[:, :, :, 1:] - img[:, :, :, :-1]).mean()
     return h_var + w_var
-
-# NEW: VGG Loss implementation
-class VGGLoss(nn.Module):
-    def __init__(self):
-        super(VGGLoss, self).__init__()
-        vgg = models.vgg19(pretrained=True).features
-        self.vgg_layers = nn.Sequential(*list(vgg.children())[:35]).eval()  # Up to relu4-4
-        for param in self.vgg_layers.parameters():
-            param.requires_grad = False
-
-    def forward(self, pred, target):
-        pred_vgg = self.vgg_layers(pred)
-        target_vgg = self.vgg_layers(target)
-        return nn.functional.mse_loss(pred_vgg, target_vgg)
 
 def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoint_iterations, checkpoint, debug_from):
     if not SPARSE_ADAM_AVAILABLE and opt.optimizer_type == "sparse_adam":
@@ -83,8 +59,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
     iter_start = torch.cuda.Event(enable_timing = True)
     iter_end = torch.cuda.Event(enable_timing = True)
 
-    # NEW: Initialize VGG Loss
-    vgg_loss = VGGLoss().to("cuda")
+    lpips_loss_fn = lpips.LPIPS(net='alex').to("cuda")
     
     use_sparse_adam = opt.optimizer_type == "sparse_adam" and SPARSE_ADAM_AVAILABLE 
     depth_l1_weight = get_expon_lr_func(opt.depth_l1_weight_init, opt.depth_l1_weight_final, max_steps=opt.iterations)
@@ -94,31 +69,16 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
     ema_loss_for_log = 0.0
     ema_Ll1depth_for_log = 0.0
 
-    # NEW: Loss weights
-    lambda_tv = 0.0001    # Weight for TV loss
-    lambda_vgg = 0.001    # Weight for VGG loss
+    lambda_tv = 0.00005
+    lambda_lpips = 0.005
 
     progress_bar = tqdm(range(first_iter, opt.iterations), desc="Training progress")
     first_iter += 1
     for iteration in range(first_iter, opt.iterations + 1):
-        if network_gui.conn == None:
-            network_gui.try_connect()
-        while network_gui.conn != None:
-            try:
-                net_image_bytes = None
-                custom_cam, do_training, pipe.convert_SHs_python, pipe.compute_cov3D_python, keep_alive, scaling_modifer = network_gui.receive()
-                if custom_cam != None:
-                    net_image = render(custom_cam, gaussians, pipe, background, scaling_modifier=scaling_modifer, use_trained_exp=dataset.train_test_exp, separate_sh=SPARSE_ADAM_AVAILABLE)["render"]
-                    net_image_bytes = memoryview((torch.clamp(net_image, min=0, max=1.0) * 255).byte().permute(1, 2, 0).contiguous().cpu().numpy())
-                network_gui.send(net_image_bytes, dataset.source_path)
-                if do_training and ((iteration < int(opt.iterations)) or not keep_alive):
-                    break
-            except Exception as e:
-                network_gui.conn = None
-
         iter_start.record()
-
         gaussians.update_learning_rate(iteration)
+
+        lambda_dssim = min(0.4, 0.2 + 0.2 * (iteration / opt.iterations))  # Tăng từ 0.2 lên 0.4
 
         if iteration % 1000 == 0:
             gaussians.oneupSHdegree()
@@ -128,7 +88,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             viewpoint_indices = list(range(len(viewpoint_stack)))
         rand_idx = randint(0, len(viewpoint_indices) - 1)
         viewpoint_cam = viewpoint_stack.pop(rand_idx)
-        vind = viewpoint_indices.pop(rand_idx)
+        viewpoint_indices.pop(rand_idx)
 
         if (iteration - 1) == debug_from:
             pipe.debug = True
@@ -149,19 +109,17 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         else:
             ssim_value = ssim(image, gt_image)
 
-        loss = (1.0 - opt.lambda_dssim) * Ll1 + opt.lambda_dssim * (1.0 - ssim_value)
+        loss = (1.0 - lambda_dssim) * Ll1 + lambda_dssim * (1.0 - ssim_value)
 
-        # NEW: Add TV Loss
         Ltv = tv_loss(image.unsqueeze(0))
         loss += lambda_tv * Ltv
 
-        # NEW: Add VGG Loss (Fixed)
-        pred_vgg = image.unsqueeze(0)  # [1, 3, H, W]
-        gt_vgg = gt_image.unsqueeze(0)  # [1, 3, H, W]
-        Lvgg = vgg_loss(pred_vgg, gt_vgg)
-        loss += lambda_vgg * Lvgg
+        if iteration % 50 == 0:
+            Llpips = lpips_loss_fn(image.unsqueeze(0), gt_image.unsqueeze(0)).mean()
+            loss += lambda_lpips * Llpips
+        else:
+            Llpips = torch.tensor(0.0, device="cuda")
 
-        # Depth regularization (original code)
         Ll1depth_pure = 0.0
         if depth_l1_weight(iteration) > 0 and viewpoint_cam.depth_reliable:
             invDepth = render_pkg["depth"]
@@ -174,6 +132,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         else:
             Ll1depth = 0
 
+        torch.cuda.empty_cache()
         loss.backward()
         iter_end.record()
 
@@ -182,12 +141,11 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             ema_Ll1depth_for_log = 0.4 * Ll1depth + 0.6 * ema_Ll1depth_for_log
 
             if iteration % 10 == 0:
-                # NEW: Update progress bar with new losses
                 progress_bar.set_postfix({
                     "Loss": f"{ema_loss_for_log:.{7}f}",
                     "Depth": f"{ema_Ll1depth_for_log:.{7}f}",
                     "TV": f"{Ltv.item():.{7}f}",
-                    "VGG": f"{Lvgg.item():.{7}f}"
+                    "LPIPS": f"{Llpips.item():.{7}f}"
                 })
                 progress_bar.update(10)
             if iteration == opt.iterations:
@@ -203,10 +161,10 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 gaussians.add_densification_stats(viewspace_point_tensor, visibility_filter)
 
                 if iteration > opt.densify_from_iter and iteration % opt.densification_interval == 0:
-                    size_threshold = 20 if iteration > opt.opacity_reset_interval else None
-                    gaussians.densify_and_prune(opt.densify_grad_threshold, 0.005, scene.cameras_extent, size_threshold, radii)
-                
-                if iteration % opt.opacity_reset_interval == 0 or (dataset.white_background and iteration == opt.densify_from_iter):
+                    densify_factor = 1.5 if iteration < 20000 else 1.2  # Adaptive densification
+                    gaussians.densify_and_prune(opt.densify_grad_threshold * densify_factor, 0.005, scene.cameras_extent, None, radii)
+
+                if iteration % (opt.opacity_reset_interval // 2) == 0 or (dataset.white_background and iteration == opt.densify_from_iter):
                     gaussians.reset_opacity()
 
             if iteration < opt.iterations:
@@ -292,13 +250,13 @@ if __name__ == "__main__":
     parser.add_argument('--port', type=int, default=6009)
     parser.add_argument('--debug_from', type=int, default=-1)
     parser.add_argument('--detect_anomaly', action='store_true', default=False)
-    parser.add_argument("--test_iterations", nargs="+", type=int, default=[7_000, 30_000])
-    parser.add_argument("--save_iterations", nargs="+", type=int, default=[7_000, 30_000])
+    parser.add_argument("--test_iterations", nargs="+", type=int, default=[7_000, 30_000, 40_000])
+    parser.add_argument("--save_iterations", nargs="+", type=int, default=[7_000, 30_000, 40_000])
     parser.add_argument("--quiet", action="store_true")
     parser.add_argument('--disable_viewer', action='store_true', default=False)
-    parser.add_argument("--checkpoint_iterations", nargs="+", type=int, default=[])
-    parser.add_argument("--start_checkpoint", type=str, default = None)
-    args = parser.parse_args(sys.argv[1:])
+    parser.add_argument("--checkpoint_iterations", nargs="+", type=int, default=[7_000, 30_000])
+    parser.add_argument("--start_checkpoint", type=str, default=None)
+    args = parser.parse_args(['-s', '/kaggle/input/gaussian-splatting-data', '--disable_viewer', '--iterations', '40000'])
     args.save_iterations.append(args.iterations)
     
     print("Optimizing " + args.model_path)
