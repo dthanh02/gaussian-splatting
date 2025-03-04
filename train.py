@@ -5,7 +5,8 @@
 # This software is free for non-commercial, research and evaluation use 
 # under the terms of the LICENSE.md file.
 #
-# For inquiries contact george.drettakis@inria.fr
+# For inquiries contact  george.drettakis@inria.fr
+#
 
 import os
 import torch
@@ -20,6 +21,8 @@ from tqdm import tqdm
 from utils.image_utils import psnr
 from argparse import ArgumentParser, Namespace
 from arguments import ModelParams, PipelineParams, OptimizationParams
+import lpips  # Thêm import cho LPIPS
+import torchvision.models as models  # Thêm import cho VGG
 
 try:
     from torch.utils.tensorboard import SummaryWriter
@@ -41,7 +44,7 @@ except:
 
 def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoint_iterations, checkpoint, debug_from):
     if not SPARSE_ADAM_AVAILABLE and opt.optimizer_type == "sparse_adam":
-        sys.exit("Trying to use sparse adam but it is not installed, please install the correct rasterizer using pip install [3dgs_accel].")
+        sys.exit(f"Trying to use sparse adam but it is not installed, please install the correct rasterizer using pip install [3dgs_accel].")
 
     first_iter = 0
     tb_writer = prepare_output_and_logger(dataset)
@@ -60,6 +63,11 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
 
     use_sparse_adam = opt.optimizer_type == "sparse_adam" and SPARSE_ADAM_AVAILABLE 
     depth_l1_weight = get_expon_lr_func(opt.depth_l1_weight_init, opt.depth_l1_weight_final, max_steps=opt.iterations)
+
+    # Thêm VGG Loss và LPIPS Loss
+    vgg16 = models.vgg16(pretrained=True).features.eval().to("cuda")  # Khởi tạo VGG16
+    lpips_loss_fn = lpips.LPIPS(net='alex').to("cuda")  # Khởi tạo LPIPS với AlexNet backbone
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(gaussians.optimizer, T_max=opt.iterations)  # Cosine Decay
 
     viewpoint_stack = scene.getTrainCameras().copy()
     viewpoint_indices = list(range(len(viewpoint_stack)))
@@ -120,6 +128,23 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
 
         loss = (1.0 - opt.lambda_dssim) * Ll1 + opt.lambda_dssim * (1.0 - ssim_value)
 
+        # Thêm VGG Loss (hệ số 0.2)
+        def extract_vgg_features(img, vgg):
+            img = torch.nn.functional.interpolate(img.unsqueeze(0), size=(224, 224), mode='bilinear', align_corners=False)
+            features = vgg(img)
+            return features
+        
+        vgg_pred = extract_vgg_features(image, vgg16)
+        vgg_gt = extract_vgg_features(gt_image, vgg16)
+        vgg_loss = torch.nn.functional.mse_loss(vgg_pred, vgg_gt)
+        loss += 0.2 * vgg_loss  # Tăng từ 0.1 lên 0.2
+
+        # Thêm LPIPS Loss (hệ số 0.1, mỗi 200 iterations)
+        if iteration % 200 == 0:
+            lpips_loss = lpips_loss_fn(image.unsqueeze(0), gt_image.unsqueeze(0)).mean()
+            loss += 0.1 * lpips_loss
+
+        # Depth regularization
         Ll1depth_pure = 0.0
         if depth_l1_weight(iteration) > 0 and viewpoint_cam.depth_reliable:
             invDepth = render_pkg["depth"]
@@ -141,14 +166,14 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             ema_Ll1depth_for_log = 0.4 * Ll1depth + 0.6 * ema_Ll1depth_for_log
 
             if iteration % 10 == 0:
-                progress_bar.set_postfix({"Loss": f"{ema_loss_for_log:.7f}", "Depth Loss": f"{ema_Ll1depth_for_log:.7f}"})
+                progress_bar.set_postfix({"Loss": f"{ema_loss_for_log:.{7}f}", "Depth Loss": f"{ema_Ll1depth_for_log:.{7}f}"})
                 progress_bar.update(10)
             if iteration == opt.iterations:
                 progress_bar.close()
 
             training_report(tb_writer, iteration, Ll1, loss, l1_loss, iter_start.elapsed_time(iter_end), testing_iterations, scene, render, (pipe, background, 1., SPARSE_ADAM_AVAILABLE, None, dataset.train_test_exp), dataset.train_test_exp)
-            if iteration in saving_iterations:
-                print(f"[ITER {iteration}] Saving Gaussians")
+            if (iteration in saving_iterations):
+                print("\n[ITER {}] Saving Gaussians".format(iteration))
                 scene.save(iteration)
 
             if iteration < opt.densify_until_iter:
@@ -172,15 +197,16 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 else:
                     gaussians.optimizer.step()
                     gaussians.optimizer.zero_grad(set_to_none=True)
+                scheduler.step()  # Bước scheduler sau mỗi iteration
 
-            if iteration in checkpoint_iterations:
-                print(f"[ITER {iteration}] Saving Checkpoint")
-                torch.save((gaussians.capture(), iteration), scene.model_path + "/chkpnt{}.pth".format(iteration))
+            if (iteration in checkpoint_iterations):
+                print("\n[ITER {}] Saving Checkpoint".format(iteration))
+                torch.save((gaussians.capture(), iteration), scene.model_path + "/chkpnt" + str(iteration) + ".pth")
 
 def prepare_output_and_logger(args):    
     if not args.model_path:
         if os.getenv('OAR_JOB_ID'):
-            unique_str = os.getenv('OAR_JOB_ID')
+            unique_str=os.getenv('OAR_JOB_ID')
         else:
             unique_str = str(uuid.uuid4())
         args.model_path = os.path.join("./output/", unique_str[0:10])
@@ -226,7 +252,7 @@ def training_report(tb_writer, iteration, Ll1, loss, l1_loss, elapsed, testing_i
                     psnr_test += psnr(image, gt_image).mean().double()
                 psnr_test /= len(config['cameras'])
                 l1_test /= len(config['cameras'])          
-                print(f"[ITER {iteration}] Evaluating {config['name']}: L1 {l1_test} PSNR {psnr_test}")
+                print("\n[ITER {}] Evaluating {}: L1 {} PSNR {}".format(iteration, config['name'], l1_test, psnr_test))
                 if tb_writer:
                     tb_writer.add_scalar(config['name'] + '/loss_viewpoint - l1_loss', l1_test, iteration)
                     tb_writer.add_scalar(config['name'] + '/loss_viewpoint - psnr', psnr_test, iteration)
@@ -260,4 +286,4 @@ if __name__ == "__main__":
         network_gui.init(args.ip, args.port)
     torch.autograd.set_detect_anomaly(args.detect_anomaly)
     training(lp.extract(args), op.extract(args), pp.extract(args), args.test_iterations, args.save_iterations, args.checkpoint_iterations, args.start_checkpoint, args.debug_from)
-    print("Training complete.")
+    print("\nTraining complete.")
