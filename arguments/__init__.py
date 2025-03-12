@@ -97,6 +97,9 @@ class OptimizationParams(ParamGroup):
         self.depth_l1_weight_final = 0.01
         self.random_background = False
         self.optimizer_type = "default"
+        self.multi_scale_threshold = 5000
+        self.low_resolution = (540, 960)
+        self.original_resolution = (1080, 1920)
         super().__init__(parser, "Optimization Parameters")
 
 def get_combined_args(parser : ArgumentParser):
