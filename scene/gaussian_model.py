@@ -456,23 +456,39 @@ class GaussianModel:
 
         self.densification_postfix(new_xyz, new_features_dc, new_features_rest, new_opacities, new_scaling, new_rotation, new_tmp_radii)
 
-    def densify_and_prune(self, max_grad, min_opacity, extent, max_screen_size, radii):
-        grads = self.xyz_gradient_accum / self.denom
-        grads[grads.isnan()] = 0.0
+   def densify_and_prune(self, max_grad, min_opacity, extent, max_screen_size, radii):
+    grads = self.xyz_gradient_accum / self.denom
+    grads[grads.isnan()] = 0.0  # Xử lý NaN trong gradients
 
-        self.tmp_radii = radii
-        # Áp dụng cả hai chiến lược clone và split
-        self.densify_and_clone(grads, max_grad, extent)
-        self.densify_and_split(grads, max_grad, extent)
+    self.tmp_radii = radii
 
-        prune_mask = (self.get_opacity < min_opacity).squeeze()
-        if max_screen_size:
-            big_points_vs = self.max_radii2D > max_screen_size
-            big_points_ws = self.get_scaling.max(dim=1).values > 0.1 * extent
-            prune_mask = torch.logical_or(torch.logical_or(prune_mask, big_points_vs), big_points_ws)
-        self.prune_points(prune_mask)
-        tmp_radii = self.tmp_radii
-        self.tmp_radii = None
+    # ------ Tối ưu Clone ------
+    # Chỉ clone nếu gradient lớn hơn ngưỡng và Gaussian có mật độ thấp (dựa trên max_radii2D)
+    clone_mask = (grads.squeeze() >= max_grad) & (self.max_radii2D < max_screen_size * 0.5)
+    if clone_mask.any():
+        self.densify_and_clone(grads, max_grad, extent, clone_mask)
+
+    # ------ Tối ưu Split ------
+    # Chỉ split nếu Gaussian quá lớn (scaling cao) nhưng trên màn hình vẫn nhỏ
+    big_scaling = self.get_scaling.max(dim=1).values > (0.1 * extent)
+    low_density = self.max_radii2D < max_screen_size * 0.5  # Nếu bán kính quá nhỏ, có thể cần split
+    split_mask = big_scaling & low_density
+
+    if split_mask.any():
+        self.densify_and_split(grads, max_grad, extent, split_mask)
+
+    # ------ Pruning ------
+    # Xóa những Gaussian có opacity thấp hoặc quá lớn so với màn hình
+    prune_mask = (self.get_opacity < min_opacity).squeeze()
+    if max_screen_size:
+        big_points_vs = self.max_radii2D > max_screen_size  # Nếu quá lớn trên màn hình → prune
+        big_points_ws = self.get_scaling.max(dim=1).values > 0.1 * extent  # Nếu scale quá lớn → prune
+        prune_mask = prune_mask | big_points_vs | big_points_ws  # Hợp các điều kiện prune
+
+    self.prune_points(prune_mask)
+
+    # Xóa bộ nhớ tạm của radii
+    self.tmp_radii = None
 
         torch.cuda.empty_cache()
 
