@@ -172,7 +172,16 @@ def render(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor, 
                 tile_depth = tile_depth[: (x_end - x_start), : (y_end - y_start)]
                 
                 # Gán vào ảnh tổng
+                # Xác định kích thước thực tế của tile
+                tile_w = x_end - x_start
+                tile_h = y_end - y_start
+                
+                # Cắt tile_depth theo kích thước giới hạn
+                tile_depth = tile_depth[:tile_w, :tile_h]
+                
+                # Gán vào ảnh tổng
                 depth_image[x_start:x_end, y_start:y_end] += tile_depth
+
 
                 radii[tile_mask[: len(tile_radii)]] = tile_radii
         
