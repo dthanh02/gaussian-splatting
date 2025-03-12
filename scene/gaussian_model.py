@@ -466,6 +466,10 @@ class GaussianModel:
     
         # ------ Tối ưu Clone ------
         # Chỉ clone nếu gradient lớn hơn ngưỡng và Gaussian có mật độ thấp (dựa trên max_radii2D)
+        # Nếu max_screen_size bị None, đặt giá trị mặc định
+        if max_screen_size is None:
+            max_screen_size = 1.0  # Giá trị hợp lý để tránh lỗi
+        
         clone_mask = (grads.squeeze() >= max_grad) & (self.max_radii2D < max_screen_size * 0.5)
         if clone_mask.any():
             self.densify_and_clone(grads, max_grad, extent, clone_mask)
