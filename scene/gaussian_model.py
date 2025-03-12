@@ -166,9 +166,10 @@ class GaussianModel:
 
         opacities = self.inverse_opacity_activation(0.1 * torch.ones((fused_point_cloud.shape[0], 1), dtype=torch.float, device="cuda"))
 
-        self._xyz = nn.Parameter(fused_point_cloud.requires_grad_(True))
-        self._features_dc = nn.Parameter(features[:, :, 0:1].transpose(1, 2).contiguous().requires_grad_(True))
-        self._features_rest = nn.Parameter(features[:, :, 1:].transpose(1, 2).contiguous().requires_grad_(True))
+        self._xyz = nn.Parameter(fused_point_cloud.half().requires_grad_(True))  # float16
+        self._scaling = nn.Parameter(scales.half().requires_grad_(True))  # float16
+        self._features_dc = nn.Parameter(features[:, :, 0:1].transpose(1, 2).contiguous().half().requires_grad_(True))  # float16
+        self._features_rest = nn.Parameter(features[:, :, 1:].transpose(1, 2).contiguous().half().requires_grad_(True))  # float16
         self._scaling = nn.Parameter(scales.requires_grad_(True))
         self._rotation = nn.Parameter(rots.requires_grad_(True))
         self._opacity = nn.Parameter(opacities.requires_grad_(True))
@@ -192,13 +193,14 @@ class GaussianModel:
             {'params': [self._rotation], 'lr': training_args.rotation_lr, "name": "rotation"}
         ]
 
-        if self.optimizer_type == "default":
-            self.optimizer = torch.optim.Adam(l, lr=0.0, eps=1e-15)
-        elif self.optimizer_type == "sparse_adam":
-            try:
-                self.optimizer = SparseGaussianAdam(l, lr=0.0, eps=1e-15)
-            except:
-                self.optimizer = torch.optim.Adam(l, lr=0.0, eps=1e-15)
+        try:
+            from diff_gaussian_rasterization import SparseGaussianAdam
+            self.optimizer = SparseGaussianAdam(l, lr=0.00016)  # Dùng Sparse Adam thay vì Adam thường
+            print("Using SparseGaussianAdam for optimization.")
+        except:
+            self.optimizer = torch.optim.Adam(l, lr=0.00016)
+            print("SparseGaussianAdam not found, falling back to Adam.")
+
 
         self.exposure_optimizer = torch.optim.Adam([self._exposure])
 
