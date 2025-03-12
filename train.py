@@ -179,7 +179,11 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         else:
             Ll1depth = 0
 
-        loss.backward()
+                if gaussians.get_xyz.shape[0] == 0:
+            print("[Error] No Gaussians left after pruning! Skipping backward() to prevent crash.")
+        else:
+            loss.backward()
+
 
         iter_end.record()
 
