@@ -181,6 +181,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
 
                 if gaussians.get_xyz.shape[0] == 0:
             print("[Error] No Gaussians left after pruning! Skipping backward() to prevent crash.")
+            viewspace_point_tensor.grad = None  # Đảm bảo không gây lỗi sau này
         else:
             loss.backward()
 
