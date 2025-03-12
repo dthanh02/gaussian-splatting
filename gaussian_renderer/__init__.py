@@ -154,12 +154,18 @@ def render(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor, 
                     rotations=tile_rotations,
                     cov3D_precomp=tile_cov3D_precomp
                 )
-        
+                        # Giới hạn biên tile để tránh vượt quá kích thước ảnh
+                x_start, x_end = i * tile_size, min((i + 1) * tile_size, image_width)
+                y_start, y_end = j * tile_size, min((j + 1) * tile_size, image_height)
+                
+                # Cắt tile_render, tile_depth theo kích thước giới hạn
+                tile_render = tile_render[:, : (x_end - x_start), : (y_end - y_start)]
+                tile_depth = tile_depth[: (x_end - x_start), : (y_end - y_start)]
+                
                 # Gán vào ảnh tổng
-                rendered_image[:, i * tile_size:(i + 1) * tile_size, j * tile_size:(j + 1) * tile_size] += tile_render
-                depth_image[i * tile_size:(i + 1) * tile_size, j * tile_size:(j + 1) * tile_size] += tile_depth
-                radii[tile_mask] = tile_radii
-
+                rendered_image[:, x_start:x_end, y_start:y_end] += tile_render
+                depth_image[x_start:x_end, y_start:y_end] += tile_depth
+                radii[tile_mask[: len(tile_radii)]] = tile_radii
         
     # Apply exposure to rendered image (training only)
     if use_trained_exp:
