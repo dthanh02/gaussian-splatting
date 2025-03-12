@@ -31,14 +31,6 @@ from tqdm import tqdm
 from utils.image_utils import psnr
 from argparse import ArgumentParser, Namespace
 from arguments import ModelParams, PipelineParams, OptimizationParams
-from torch.fft import fft2, ifft2
-
-def fourier_loss(image, gt_image):
-    img_fft = torch.abs(fft2(image))
-    gt_fft = torch.abs(fft2(gt_image))
-    return torch.mean(torch.abs(img_fft - gt_fft))
-
-
 try:
     from torch.utils.tensorboard import SummaryWriter
     TENSORBOARD_FOUND = True
@@ -136,24 +128,10 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         viewspace_point_tensor = render_pkg["viewspace_points"]
         visibility_filter = render_pkg["visibility_filter"]
         radii = render_pkg["radii"]
-        gt_image = viewpoint_cam.original_image[0:3, :, :]  # Lấy ảnh gốc để tính Loss
-        
-               # Đảm bảo loss được khởi tạo
-        if 'loss' not in locals():
-            loss = torch.tensor(0.0, device="cuda", requires_grad=True)  # Dùng tensor để hỗ trợ autograd
-        
-        # Kiểm tra nếu image tồn tại trước khi tính Fourier Loss
-        if image is not None and gt_image is not None:
-            loss_fourier = fourier_loss(image, gt_image)
-            loss = loss + 0.1 * loss_fourier  # Tránh in-place operation
-        else:
-            print("[Warning] Skipping Fourier Loss computation due to missing images.")
-        
-        # Đảm bảo alpha_mask có cùng dtype với image trước khi nhân
-        if viewpoint_cam.alpha_mask is not None:
-            alpha_mask = viewpoint_cam.alpha_mask.cuda().to(image.dtype)  # Chuyển dtype phù hợp
-            image *= alpha_mask
 
+        if viewpoint_cam.alpha_mask is not None:
+            alpha_mask = viewpoint_cam.alpha_mask.cuda()
+            image *= alpha_mask
 
         # Loss computation
         gt_image = viewpoint_cam.original_image.cuda()
@@ -179,12 +157,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         else:
             Ll1depth = 0
 
-                if gaussians.get_xyz.shape[0] == 0:
-            print("[Error] No Gaussians left after pruning! Skipping backward() to prevent crash.")
-            viewspace_point_tensor.grad = None  # Đảm bảo không gây lỗi sau này
-        else:
-            loss.backward()
-
+        loss.backward()
 
         iter_end.record()
 
