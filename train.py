@@ -38,8 +38,7 @@ def fourier_loss(image, gt_image):
     gt_fft = torch.abs(fft2(gt_image))
     return torch.mean(torch.abs(img_fft - gt_fft))
 
-loss_fourier = fourier_loss(image, gt_image)  
-loss += 0.1 * loss_fourier  # Trọng số điều chỉnh theo thử nghiệm
+
 try:
     from torch.utils.tensorboard import SummaryWriter
     TENSORBOARD_FOUND = True
@@ -137,6 +136,14 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         viewspace_point_tensor = render_pkg["viewspace_points"]
         visibility_filter = render_pkg["visibility_filter"]
         radii = render_pkg["radii"]
+        gt_image = viewpoint_cam.original_image[0:3, :, :]  # Lấy ảnh gốc để tính Loss
+        
+        # Kiểm tra nếu image tồn tại trước khi tính Fourier Loss
+        if image is not None and gt_image is not None:
+            loss_fourier = fourier_loss(image, gt_image)
+            loss += 0.1 * loss_fourier  # Cộng Fourier Loss vào tổng Loss
+        else:
+            print("[Warning] Skipping Fourier Loss computation due to missing images.")
 
         if viewpoint_cam.alpha_mask is not None:
             alpha_mask = viewpoint_cam.alpha_mask.cuda()
