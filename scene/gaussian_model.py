@@ -486,6 +486,10 @@ class GaussianModel:
         # ------ Pruning ------
         # Xóa những Gaussian có opacity thấp hoặc quá lớn so với màn hình
         prune_mask = (self.get_opacity < min_opacity).squeeze()
+        if prune_mask.sum() == self.get_opacity.shape[0]:  # Nếu tất cả Gaussians bị xóa, dừng lại
+            print("[Warning] All Gaussians are being pruned! Reducing threshold.")
+            prune_mask[:] = False  # Không xóa hết Gaussians
+
         if max_screen_size:
             big_points_vs = self.max_radii2D > max_screen_size  # Nếu quá lớn trên màn hình → prune
             big_points_ws = self.get_scaling.max(dim=1).values > 0.1 * extent  # Nếu scale quá lớn → prune
