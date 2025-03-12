@@ -15,17 +15,6 @@ from diff_gaussian_rasterization import GaussianRasterizationSettings, GaussianR
 from scene.gaussian_model import GaussianModel
 from utils.sh_utils import eval_sh
 
-def filter_gaussians_for_tile(means2D, tile_x, tile_y, tile_size, image_width, image_height):
-    """ Lọc Gaussian nằm trong một tile cụ thể """
-    x_min, x_max = tile_x * tile_size, (tile_x + 1) * tile_size
-    y_min, y_max = tile_y * tile_size, (tile_y + 1) * tile_size
-
-    inside_tile = (
-        (means2D[:, 0] >= x_min) & (means2D[:, 0] < x_max) &
-        (means2D[:, 1] >= y_min) & (means2D[:, 1] < y_max)
-    )
-    return inside_tile
-
 def render(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor, scaling_modifier = 1.0, separate_sh = False, override_color = None, use_trained_exp=False, resolution=None):
 
     """
@@ -115,75 +104,15 @@ def render(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor, 
             rotations = rotations,
             cov3D_precomp = cov3D_precomp)
     else:
-        # Kích thước tile (có thể điều chỉnh, thử nghiệm với 128, 64, 32)
-        tile_size = 128  
-        num_tiles_x = image_width // tile_size
-        num_tiles_y = image_height // tile_size
-        
-        # Tạo ảnh trống để chứa kết quả render
-        rendered_image = torch.zeros((3, image_height, image_width), device="cuda")
-        depth_image = torch.zeros((image_height, image_width), device="cuda")
-        radii = torch.zeros((means2D.shape[0],), device="cuda")
-        
-        # Duyệt qua từng tile để render
-        for i in range(num_tiles_x):
-            for j in range(num_tiles_y):
-                # Lọc Gaussian thuộc về tile này
-                tile_mask = filter_gaussians_for_tile(means2D, i, j, tile_size, image_width, image_height)
-                if not tile_mask.any():
-                    continue  # Bỏ qua tile nếu không có Gaussian bên trong
-        
-                # Lấy Gaussian của tile
-                tile_means2D = means2D[tile_mask]
-                tile_means3D = means3D[tile_mask]
-                tile_opacity = opacity[tile_mask]
-                tile_scales = scales[tile_mask] if scales is not None else None
-                tile_rotations = rotations[tile_mask] if rotations is not None else None
-                tile_cov3D_precomp = cov3D_precomp[tile_mask] if cov3D_precomp is not None else None
-                tile_shs = shs[tile_mask] if shs is not None else None
-                tile_colors_precomp = colors_precomp[tile_mask] if colors_precomp is not None else None
-        
-                # Render tile
-                tile_render, tile_radii, tile_depth = rasterizer(
-                    means3D=tile_means3D,
-                    means2D=tile_means2D,
-                    shs=tile_shs,
-                    colors_precomp=tile_colors_precomp,
-                    opacities=tile_opacity,
-                    scales=tile_scales,
-                    rotations=tile_rotations,
-                    cov3D_precomp=tile_cov3D_precomp
-                )
-                        # Giới hạn biên tile để tránh vượt quá kích thước ảnh
-                x_start, x_end = i * tile_size, min((i + 1) * tile_size, image_width)
-                y_start, y_end = j * tile_size, min((j + 1) * tile_size, image_height)
-                
-                # Cắt tile_render, tile_depth theo kích thước giới hạn
-                tile_render = tile_render[:, : (x_end - x_start), : (y_end - y_start)]
-                tile_depth = tile_depth[: (x_end - x_start), : (y_end - y_start)]
-                
-                # Gán vào ảnh tổng
-                rendered_image[:, x_start:x_end, y_start:y_end] += tile_render
-                # Giới hạn biên tile để tránh vượt quá kích thước ảnh
-                x_start, x_end = i * tile_size, min((i + 1) * tile_size, image_width)
-                y_start, y_end = j * tile_size, min((j + 1) * tile_size, image_height)
-                
-                # Cắt tile_depth theo kích thước giới hạn
-                tile_depth = tile_depth[: (x_end - x_start), : (y_end - y_start)]
-                
-                # Gán vào ảnh tổng
-                # Xác định kích thước thực tế của tile
-                tile_w = x_end - x_start
-                tile_h = y_end - y_start
-                
-                # Cắt tile_depth theo kích thước giới hạn
-                tile_depth = tile_depth[:tile_w, :tile_h]
-                
-                # Gán vào ảnh tổng
-                depth_image[x_start:x_end, y_start:y_end] += tile_depth
-
-
-                radii[tile_mask[: len(tile_radii)]] = tile_radii
+        rendered_image, radii, depth_image = rasterizer(
+            means3D = means3D,
+            means2D = means2D,
+            shs = shs,
+            colors_precomp = colors_precomp,
+            opacities = opacity,
+            scales = scales,
+            rotations = rotations,
+            cov3D_precomp = cov3D_precomp)
         
     # Apply exposure to rendered image (training only)
     if use_trained_exp:
