@@ -30,6 +30,8 @@ except:
 class GaussianModel:
 
     def setup_functions(self):
+        # Sử dụng hàm build_scaling_rotation để tạo L = R * diag(scaling^2)
+        # Sau đó, covariance được tính là L @ L^T. Đây là cách biểu diễn anisotropic covariance.
         def build_covariance_from_scaling_rotation(scaling, scaling_modifier, rotation):
             L = build_scaling_rotation(scaling_modifier * scaling, rotation)
             actual_covariance = L @ L.transpose(1, 2)
@@ -44,8 +46,8 @@ class GaussianModel:
         self.opacity_activation = torch.sigmoid
         self.inverse_opacity_activation = inverse_sigmoid
 
+        # Hàm normalize rotation đã đảm bảo rằng rotation được chuẩn hóa.
         self.rotation_activation = torch.nn.functional.normalize
-
 
     def __init__(self, sh_degree, optimizer_type="default"):
         self.active_sh_degree = 0
@@ -139,7 +141,8 @@ class GaussianModel:
         else:
             return self.pretrained_exposures[image_name]
     
-    def get_covariance(self, scaling_modifier = 1):
+    def get_covariance(self, scaling_modifier=1):
+        # Trả về covariance dựa trên anisotropic scaling và rotation
         return self.covariance_activation(self.get_scaling, scaling_modifier, self._rotation)
 
     def oneupSHdegree(self):
@@ -151,21 +154,21 @@ class GaussianModel:
         fused_point_cloud = torch.tensor(np.asarray(pcd.points)).float().cuda()
         fused_color = RGB2SH(torch.tensor(np.asarray(pcd.colors)).float().cuda())
         features = torch.zeros((fused_color.shape[0], 3, (self.max_sh_degree + 1) ** 2)).float().cuda()
-        features[:, :3, 0 ] = fused_color
+        features[:, :3, 0] = fused_color
         features[:, 3:, 1:] = 0.0
 
         print("Number of points at initialisation : ", fused_point_cloud.shape[0])
 
         dist2 = torch.clamp_min(distCUDA2(torch.from_numpy(np.asarray(pcd.points)).float().cuda()), 0.0000001)
-        scales = torch.log(torch.sqrt(dist2))[...,None].repeat(1, 3)
+        scales = torch.log(torch.sqrt(dist2))[..., None].repeat(1, 3)
         rots = torch.zeros((fused_point_cloud.shape[0], 4), device="cuda")
         rots[:, 0] = 1
 
         opacities = self.inverse_opacity_activation(0.1 * torch.ones((fused_point_cloud.shape[0], 1), dtype=torch.float, device="cuda"))
 
         self._xyz = nn.Parameter(fused_point_cloud.requires_grad_(True))
-        self._features_dc = nn.Parameter(features[:,:,0:1].transpose(1, 2).contiguous().requires_grad_(True))
-        self._features_rest = nn.Parameter(features[:,:,1:].transpose(1, 2).contiguous().requires_grad_(True))
+        self._features_dc = nn.Parameter(features[:, :, 0:1].transpose(1, 2).contiguous().requires_grad_(True))
+        self._features_rest = nn.Parameter(features[:, :, 1:].transpose(1, 2).contiguous().requires_grad_(True))
         self._scaling = nn.Parameter(scales.requires_grad_(True))
         self._rotation = nn.Parameter(rots.requires_grad_(True))
         self._opacity = nn.Parameter(opacities.requires_grad_(True))
@@ -195,13 +198,12 @@ class GaussianModel:
             try:
                 self.optimizer = SparseGaussianAdam(l, lr=0.0, eps=1e-15)
             except:
-                # A special version of the rasterizer is required to enable sparse adam
                 self.optimizer = torch.optim.Adam(l, lr=0.0, eps=1e-15)
 
         self.exposure_optimizer = torch.optim.Adam([self._exposure])
 
-        self.xyz_scheduler_args = get_expon_lr_func(lr_init=training_args.position_lr_init*self.spatial_lr_scale,
-                                                    lr_final=training_args.position_lr_final*self.spatial_lr_scale,
+        self.xyz_scheduler_args = get_expon_lr_func(lr_init=training_args.position_lr_init * self.spatial_lr_scale,
+                                                    lr_final=training_args.position_lr_final * self.spatial_lr_scale,
                                                     lr_delay_mult=training_args.position_lr_delay_mult,
                                                     max_steps=training_args.position_lr_max_steps)
         
@@ -224,7 +226,6 @@ class GaussianModel:
 
     def construct_list_of_attributes(self):
         l = ['x', 'y', 'z', 'nx', 'ny', 'nz']
-        # All channels except the 3 DC
         for i in range(self._features_dc.shape[1]*self._features_dc.shape[2]):
             l.append('f_dc_{}'.format(i))
         for i in range(self._features_rest.shape[1]*self._features_rest.shape[2]):
@@ -256,11 +257,11 @@ class GaussianModel:
         PlyData([el]).write(path)
 
     def reset_opacity(self):
-        opacities_new = self.inverse_opacity_activation(torch.min(self.get_opacity, torch.ones_like(self.get_opacity)*0.01))
+        opacities_new = self.inverse_opacity_activation(torch.min(self.get_opacity, torch.ones_like(self.get_opacity) * 0.01))
         optimizable_tensors = self.replace_tensor_to_optimizer(opacities_new, "opacity")
         self._opacity = optimizable_tensors["opacity"]
 
-    def load_ply(self, path, use_train_test_exp = False):
+    def load_ply(self, path, use_train_test_exp=False):
         plydata = PlyData.read(path)
         if use_train_test_exp:
             exposure_file = os.path.join(os.path.dirname(path), os.pardir, os.pardir, "exposure.json")
@@ -275,7 +276,7 @@ class GaussianModel:
 
         xyz = np.stack((np.asarray(plydata.elements[0]["x"]),
                         np.asarray(plydata.elements[0]["y"]),
-                        np.asarray(plydata.elements[0]["z"])),  axis=1)
+                        np.asarray(plydata.elements[0]["z"])), axis=1)
         opacities = np.asarray(plydata.elements[0]["opacity"])[..., np.newaxis]
 
         features_dc = np.zeros((xyz.shape[0], 3, 1))
@@ -284,22 +285,21 @@ class GaussianModel:
         features_dc[:, 2, 0] = np.asarray(plydata.elements[0]["f_dc_2"])
 
         extra_f_names = [p.name for p in plydata.elements[0].properties if p.name.startswith("f_rest_")]
-        extra_f_names = sorted(extra_f_names, key = lambda x: int(x.split('_')[-1]))
-        assert len(extra_f_names)==3*(self.max_sh_degree + 1) ** 2 - 3
+        extra_f_names = sorted(extra_f_names, key=lambda x: int(x.split('_')[-1]))
+        assert len(extra_f_names) == 3 * (self.max_sh_degree + 1) ** 2 - 3
         features_extra = np.zeros((xyz.shape[0], len(extra_f_names)))
         for idx, attr_name in enumerate(extra_f_names):
             features_extra[:, idx] = np.asarray(plydata.elements[0][attr_name])
-        # Reshape (P,F*SH_coeffs) to (P, F, SH_coeffs except DC)
         features_extra = features_extra.reshape((features_extra.shape[0], 3, (self.max_sh_degree + 1) ** 2 - 1))
 
         scale_names = [p.name for p in plydata.elements[0].properties if p.name.startswith("scale_")]
-        scale_names = sorted(scale_names, key = lambda x: int(x.split('_')[-1]))
+        scale_names = sorted(scale_names, key=lambda x: int(x.split('_')[-1]))
         scales = np.zeros((xyz.shape[0], len(scale_names)))
         for idx, attr_name in enumerate(scale_names):
             scales[:, idx] = np.asarray(plydata.elements[0][attr_name])
 
         rot_names = [p.name for p in plydata.elements[0].properties if p.name.startswith("rot")]
-        rot_names = sorted(rot_names, key = lambda x: int(x.split('_')[-1]))
+        rot_names = sorted(rot_names, key=lambda x: int(x.split('_')[-1]))
         rots = np.zeros((xyz.shape[0], len(rot_names)))
         for idx, attr_name in enumerate(rot_names):
             rots[:, idx] = np.asarray(plydata.elements[0][attr_name])
@@ -370,7 +370,6 @@ class GaussianModel:
             extension_tensor = tensors_dict[group["name"]]
             stored_state = self.optimizer.state.get(group['params'][0], None)
             if stored_state is not None:
-
                 stored_state["exp_avg"] = torch.cat((stored_state["exp_avg"], torch.zeros_like(extension_tensor)), dim=0)
                 stored_state["exp_avg_sq"] = torch.cat((stored_state["exp_avg_sq"], torch.zeros_like(extension_tensor)), dim=0)
 
@@ -386,12 +385,14 @@ class GaussianModel:
         return optimizable_tensors
 
     def densification_postfix(self, new_xyz, new_features_dc, new_features_rest, new_opacities, new_scaling, new_rotation, new_tmp_radii):
-        d = {"xyz": new_xyz,
-        "f_dc": new_features_dc,
-        "f_rest": new_features_rest,
-        "opacity": new_opacities,
-        "scaling" : new_scaling,
-        "rotation" : new_rotation}
+        d = {
+            "xyz": new_xyz,
+            "f_dc": new_features_dc,
+            "f_rest": new_features_rest,
+            "opacity": new_opacities,
+            "scaling": new_scaling,
+            "rotation": new_rotation
+        }
 
         optimizable_tensors = self.cat_tensors_to_optimizer(d)
         self._xyz = optimizable_tensors["xyz"]
@@ -406,25 +407,29 @@ class GaussianModel:
         self.denom = torch.zeros((self.get_xyz.shape[0], 1), device="cuda")
         self.max_radii2D = torch.zeros((self.get_xyz.shape[0]), device="cuda")
 
+    # ------------------ CÁC CHIẾN LƯỢC DENSIFICATION ------------------
     def densify_and_split(self, grads, grad_threshold, scene_extent, N=2):
         n_init_points = self.get_xyz.shape[0]
-        # Extract points that satisfy the gradient condition
+        # Tính gradient trung bình và chọn các điểm có gradient >= grad_threshold
         padded_grad = torch.zeros((n_init_points), device="cuda")
         padded_grad[:grads.shape[0]] = grads.squeeze()
         selected_pts_mask = torch.where(padded_grad >= grad_threshold, True, False)
+        # Chỉ split các điểm có kích thước (scaling) quá lớn (vượt quá một ngưỡng nhất định)
         selected_pts_mask = torch.logical_and(selected_pts_mask,
-                                              torch.max(self.get_scaling, dim=1).values > self.percent_dense*scene_extent)
+                                              torch.max(self.get_scaling, dim=1).values > self.percent_dense * scene_extent)
 
-        stds = self.get_scaling[selected_pts_mask].repeat(N,1)
-        means =torch.zeros((stds.size(0), 3),device="cuda")
+        stds = self.get_scaling[selected_pts_mask].repeat(N, 1)
+        means = torch.zeros((stds.size(0), 3), device="cuda")
+        # Lấy mẫu với phân phối chuẩn, dùng stds như độ lệch
         samples = torch.normal(mean=means, std=stds)
-        rots = build_rotation(self._rotation[selected_pts_mask]).repeat(N,1,1)
+        rots = build_rotation(self._rotation[selected_pts_mask]).repeat(N, 1, 1)
         new_xyz = torch.bmm(rots, samples.unsqueeze(-1)).squeeze(-1) + self.get_xyz[selected_pts_mask].repeat(N, 1)
-        new_scaling = self.scaling_inverse_activation(self.get_scaling[selected_pts_mask].repeat(N,1) / (0.8*N))
-        new_rotation = self._rotation[selected_pts_mask].repeat(N,1)
-        new_features_dc = self._features_dc[selected_pts_mask].repeat(N,1,1)
-        new_features_rest = self._features_rest[selected_pts_mask].repeat(N,1,1)
-        new_opacity = self._opacity[selected_pts_mask].repeat(N,1)
+        # Cập nhật scaling theo chiến lược split (giảm kích thước)
+        new_scaling = self.scaling_inverse_activation(self.get_scaling[selected_pts_mask].repeat(N, 1) / (0.8 * N))
+        new_rotation = self._rotation[selected_pts_mask].repeat(N, 1)
+        new_features_dc = self._features_dc[selected_pts_mask].repeat(N, 1, 1)
+        new_features_rest = self._features_rest[selected_pts_mask].repeat(N, 1, 1)
+        new_opacity = self._opacity[selected_pts_mask].repeat(N, 1)
         new_tmp_radii = self.tmp_radii[selected_pts_mask].repeat(N)
 
         self.densification_postfix(new_xyz, new_features_dc, new_features_rest, new_opacity, new_scaling, new_rotation, new_tmp_radii)
@@ -433,12 +438,14 @@ class GaussianModel:
         self.prune_points(prune_filter)
 
     def densify_and_clone(self, grads, grad_threshold, scene_extent):
-        # Extract points that satisfy the gradient condition
+        # Tìm các điểm có gradient >= grad_threshold
         selected_pts_mask = torch.where(torch.norm(grads, dim=-1) >= grad_threshold, True, False)
+        # Ở đây, clone các điểm có kích thước nhỏ (<= threshold) để tăng mật độ ở vùng under-reconstructed
         selected_pts_mask = torch.logical_and(selected_pts_mask,
-                                              torch.max(self.get_scaling, dim=1).values <= self.percent_dense*scene_extent)
-        
-        new_xyz = self._xyz[selected_pts_mask]
+                                              torch.max(self.get_scaling, dim=1).values <= self.percent_dense * scene_extent)
+        # THÊM một chút noise để tạo sự khác biệt giữa điểm gốc và điểm clone
+        noise = torch.randn_like(self._xyz[selected_pts_mask]) * 0.01
+        new_xyz = self._xyz[selected_pts_mask] + noise
         new_features_dc = self._features_dc[selected_pts_mask]
         new_features_rest = self._features_rest[selected_pts_mask]
         new_opacities = self._opacity[selected_pts_mask]
@@ -454,6 +461,7 @@ class GaussianModel:
         grads[grads.isnan()] = 0.0
 
         self.tmp_radii = radii
+        # Áp dụng cả hai chiến lược clone và split
         self.densify_and_clone(grads, max_grad, extent)
         self.densify_and_split(grads, max_grad, extent)
 
@@ -469,5 +477,5 @@ class GaussianModel:
         torch.cuda.empty_cache()
 
     def add_densification_stats(self, viewspace_point_tensor, update_filter):
-        self.xyz_gradient_accum[update_filter] += torch.norm(viewspace_point_tensor.grad[update_filter,:2], dim=-1, keepdim=True)
+        self.xyz_gradient_accum[update_filter] += torch.norm(viewspace_point_tensor.grad[update_filter, :2], dim=-1, keepdim=True)
         self.denom[update_filter] += 1
