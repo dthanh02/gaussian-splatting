@@ -31,6 +31,15 @@ from tqdm import tqdm
 from utils.image_utils import psnr
 from argparse import ArgumentParser, Namespace
 from arguments import ModelParams, PipelineParams, OptimizationParams
+from torch.fft import fft2, ifft2
+
+def fourier_loss(image, gt_image):
+    img_fft = torch.abs(fft2(image))
+    gt_fft = torch.abs(fft2(gt_image))
+    return torch.mean(torch.abs(img_fft - gt_fft))
+
+loss_fourier = fourier_loss(image, gt_image)  
+loss += 0.1 * loss_fourier  # Trọng số điều chỉnh theo thử nghiệm
 try:
     from torch.utils.tensorboard import SummaryWriter
     TENSORBOARD_FOUND = True
