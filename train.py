@@ -138,16 +138,22 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         radii = render_pkg["radii"]
         gt_image = viewpoint_cam.original_image[0:3, :, :]  # Lấy ảnh gốc để tính Loss
         
+               # Đảm bảo loss được khởi tạo
+        if 'loss' not in locals():
+            loss = torch.tensor(0.0, device="cuda", requires_grad=True)  # Dùng tensor để hỗ trợ autograd
+        
         # Kiểm tra nếu image tồn tại trước khi tính Fourier Loss
         if image is not None and gt_image is not None:
             loss_fourier = fourier_loss(image, gt_image)
             loss += 0.1 * loss_fourier  # Cộng Fourier Loss vào tổng Loss
         else:
             print("[Warning] Skipping Fourier Loss computation due to missing images.")
-
+        
+        # Đảm bảo alpha_mask có cùng dtype với image trước khi nhân
         if viewpoint_cam.alpha_mask is not None:
-            alpha_mask = viewpoint_cam.alpha_mask.cuda()
+            alpha_mask = viewpoint_cam.alpha_mask.cuda().to(image.dtype)  # Chuyển dtype phù hợp
             image *= alpha_mask
+
 
         # Loss computation
         gt_image = viewpoint_cam.original_image.cuda()
