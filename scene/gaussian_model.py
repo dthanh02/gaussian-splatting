@@ -166,10 +166,9 @@ class GaussianModel:
 
         opacities = self.inverse_opacity_activation(0.1 * torch.ones((fused_point_cloud.shape[0], 1), dtype=torch.float, device="cuda"))
 
-        self._xyz = nn.Parameter(fused_point_cloud.float().requires_grad_(True))  # float32
-        self._scaling = nn.Parameter(scales.float().requires_grad_(True))  # float32
-        self._features_dc = nn.Parameter(features[:, :, 0:1].transpose(1, 2).contiguous().float().requires_grad_(True))  # float32
-        self._features_rest = nn.Parameter(features[:, :, 1:].transpose(1, 2).contiguous().float().requires_grad_(True))  # float32
+        self._xyz = nn.Parameter(fused_point_cloud.requires_grad_(True))
+        self._features_dc = nn.Parameter(features[:, :, 0:1].transpose(1, 2).contiguous().requires_grad_(True))
+        self._features_rest = nn.Parameter(features[:, :, 1:].transpose(1, 2).contiguous().requires_grad_(True))
         self._scaling = nn.Parameter(scales.requires_grad_(True))
         self._rotation = nn.Parameter(rots.requires_grad_(True))
         self._opacity = nn.Parameter(opacities.requires_grad_(True))
@@ -193,14 +192,13 @@ class GaussianModel:
             {'params': [self._rotation], 'lr': training_args.rotation_lr, "name": "rotation"}
         ]
 
-        try:
-            from diff_gaussian_rasterization import SparseGaussianAdam
-            self.optimizer = SparseGaussianAdam(l, lr=0.00016)  # Dùng Sparse Adam thay vì Adam thường
-            print("Using SparseGaussianAdam for optimization.")
-        except:
-            self.optimizer = torch.optim.Adam(l, lr=0.00016)
-            print("SparseGaussianAdam not found, falling back to Adam.")
-
+        if self.optimizer_type == "default":
+            self.optimizer = torch.optim.Adam(l, lr=0.0, eps=1e-15)
+        elif self.optimizer_type == "sparse_adam":
+            try:
+                self.optimizer = SparseGaussianAdam(l, lr=0.0, eps=1e-15)
+            except:
+                self.optimizer = torch.optim.Adam(l, lr=0.0, eps=1e-15)
 
         self.exposure_optimizer = torch.optim.Adam([self._exposure])
 
@@ -460,51 +458,24 @@ class GaussianModel:
 
     def densify_and_prune(self, max_grad, min_opacity, extent, max_screen_size, radii):
         grads = self.xyz_gradient_accum / self.denom
-        grads[grads.isnan()] = 0.0  # Xử lý NaN trong gradients
-    
-        self.tmp_radii = radii
-    
-        # ------ Tối ưu Clone ------
-        # Chỉ clone nếu gradient lớn hơn ngưỡng và Gaussian có mật độ thấp (dựa trên max_radii2D)
-        # Nếu max_screen_size bị None, đặt giá trị mặc định
-        if max_screen_size is None:
-            max_screen_size = 1.0  # Giá trị hợp lý để tránh lỗi
-        
-        clone_mask = (grads.squeeze() >= max_grad) & (self.max_radii2D < max_screen_size * 0.5)
-        if clone_mask.any():
-            self.densify_and_clone(grads, max_grad, extent, clone_mask)
-    
-        # ------ Tối ưu Split ------
-        # Chỉ split nếu Gaussian quá lớn (scaling cao) nhưng trên màn hình vẫn nhỏ
-        big_scaling = self.get_scaling.max(dim=1).values > (0.1 * extent)
-        low_density = self.max_radii2D < max_screen_size * 0.5  # Nếu bán kính quá nhỏ, có thể cần split
-        split_mask = big_scaling & low_density
-    
-        if split_mask.any():
-            self.densify_and_split(grads, max_grad, extent, split_mask)
-    
-        # ------ Pruning ------
-        # Xóa những Gaussian có opacity thấp hoặc quá lớn so với màn hình
-        prune_mask = (self.get_opacity < min_opacity).squeeze()
-        if prune_mask.sum() == self.get_opacity.shape[0]:  # Nếu tất cả Gaussians bị xóa, dừng lại
-            print("[Warning] All Gaussians are being pruned! Reducing threshold.")
-            prune_mask[:] = False  # Không xóa hết Gaussians
+        grads[grads.isnan()] = 0.0
 
+        self.tmp_radii = radii
+        # Áp dụng cả hai chiến lược clone và split
+        self.densify_and_clone(grads, max_grad, extent)
+        self.densify_and_split(grads, max_grad, extent)
+
+        prune_mask = (self.get_opacity < min_opacity).squeeze()
         if max_screen_size:
-            big_points_vs = self.max_radii2D > max_screen_size  # Nếu quá lớn trên màn hình → prune
-            big_points_ws = self.get_scaling.max(dim=1).values > 0.1 * extent  # Nếu scale quá lớn → prune
-            prune_mask = prune_mask | big_points_vs | big_points_ws  # Hợp các điều kiện prune
-    
+            big_points_vs = self.max_radii2D > max_screen_size
+            big_points_ws = self.get_scaling.max(dim=1).values > 0.1 * extent
+            prune_mask = torch.logical_or(torch.logical_or(prune_mask, big_points_vs), big_points_ws)
         self.prune_points(prune_mask)
-    
-        # Xóa bộ nhớ tạm của radii
+        tmp_radii = self.tmp_radii
         self.tmp_radii = None
 
         torch.cuda.empty_cache()
 
     def add_densification_stats(self, viewspace_point_tensor, update_filter):
-        if viewspace_point_tensor.grad is not None:
-            self.xyz_gradient_accum[update_filter] += torch.norm(viewspace_point_tensor.grad[update_filter, :2], dim=-1, keepdim=True)
-        else:
-            print("[Warning] Skipping gradient update because viewspace_point_tensor.grad is None")
+        self.xyz_gradient_accum[update_filter] += torch.norm(viewspace_point_tensor.grad[update_filter, :2], dim=-1, keepdim=True)
         self.denom[update_filter] += 1
