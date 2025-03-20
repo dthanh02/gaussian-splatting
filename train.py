@@ -7,19 +7,10 @@
 #
 # For inquiries contact  george.drettakis@inria.fr
 #
-#
-# Copyright (C) 2023, Inria
-# GRAPHDECO research group, https://team.inria.fr/graphdeco
-# All rights reserved.
-#
-# This software is free for non-commercial, research and evaluation use 
-# under the terms of the LICENSE.md file.
-#
-# For inquiries contact  george.drettakis@inria.fr
-#
 
 import os
 import torch
+import time
 from random import randint
 from utils.loss_utils import l1_loss, ssim
 from gaussian_renderer import render, network_gui
@@ -40,13 +31,13 @@ except ImportError:
 try:
     from fused_ssim import fused_ssim
     FUSED_SSIM_AVAILABLE = True
-except:
+except ImportError:
     FUSED_SSIM_AVAILABLE = False
 
 try:
     from diff_gaussian_rasterization import SparseGaussianAdam
     SPARSE_ADAM_AVAILABLE = True
-except:
+except ImportError:
     SPARSE_ADAM_AVAILABLE = False
 
 def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoint_iterations, checkpoint, debug_from):
@@ -76,6 +67,10 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
     viewpoint_indices = list(range(len(viewpoint_stack)))
     ema_loss_for_log = 0.0
     ema_Ll1depth_for_log = 0.0
+
+    # Các biến để tích lũy thời gian render cho FPS trung bình mỗi 10.000 iter
+    accumulated_render_time = 0.0
+    render_count = 0
 
     progress_bar = tqdm(range(first_iter, opt.iterations), desc="Training progress")
     first_iter += 1
@@ -123,7 +118,20 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
 
         bg = torch.rand((3), device="cuda") if opt.random_background else background
 
+        # --- Đo thời gian render cho frame hiện tại ---
+        render_start = time.time()
         render_pkg = render(viewpoint_cam, gaussians, pipe, bg, use_trained_exp=dataset.train_test_exp, separate_sh=SPARSE_ADAM_AVAILABLE, resolution=resolution)
+        torch.cuda.synchronize()  # Đồng bộ GPU để đảm bảo render hoàn thành
+        render_elapsed = time.time() - render_start
+        # Tích lũy thời gian và số frame cho việc in FPS trung bình mỗi 10.000 iter
+        render_count += 1
+        accumulated_render_time += render_elapsed
+        if iteration % 30000 == 0:
+            avg_render_fps = render_count / accumulated_render_time if accumulated_render_time > 0 else float('inf')
+            print(f"[ITER {iteration}] Average Render FPS over last {render_count} iterations: {avg_render_fps:.2f}", flush=True)
+            accumulated_render_time = 0.0
+            render_count = 0
+
         image = render_pkg["render"]
         viewspace_point_tensor = render_pkg["viewspace_points"]
         visibility_filter = render_pkg["visibility_filter"]
@@ -167,15 +175,15 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             ema_Ll1depth_for_log = 0.4 * Ll1depth + 0.6 * ema_Ll1depth_for_log
 
             if iteration % 10 == 0:
-                progress_bar.set_postfix({"Loss": f"{ema_loss_for_log:.7f}", "Depth Loss": f"{ema_Ll1depth_for_log:.7f}"})
+                progress_bar.set_postfix({"Loss": f"{ema_loss_for_log:.7f}", "Depth Loss": f"{ema_Ll1depth_for_log:.7f}", "SSIM": f"{ssim_value.item():.4f}"})
                 progress_bar.update(10)
             if iteration == opt.iterations:
                 progress_bar.close()
 
-            # Logging and saving results
-            training_report(tb_writer, iteration, Ll1, loss, l1_loss, iter_start.elapsed_time(iter_end), testing_iterations, scene, render, (pipe, background, 1., SPARSE_ADAM_AVAILABLE, None, dataset.train_test_exp), dataset.train_test_exp)
+            # Logging and saving results (log SSIM vào TensorBoard)
+            training_report(tb_writer, iteration, Ll1, loss, l1_loss, iter_start.elapsed_time(iter_end), testing_iterations, scene, render, (pipe, background, 1., SPARSE_ADAM_AVAILABLE, None, dataset.train_test_exp), dataset.train_test_exp, ssim_value)
             if (iteration in saving_iterations):
-                print("\n[ITER {}] Saving Gaussians".format(iteration))
+                print("[ITER {}] Saving Gaussians".format(iteration))
                 scene.save(iteration)
 
             # Densification block: áp dụng chiến lược clone/split và pruning một cách cẩn thận để không phá vỡ liên kết giữa các module
@@ -204,7 +212,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                     gaussians.optimizer.zero_grad(set_to_none=True)
 
             if (iteration in checkpoint_iterations):
-                print("\n[ITER {}] Saving Checkpoint".format(iteration))
+                print("[ITER {}] Saving Checkpoint".format(iteration))
                 torch.save((gaussians.capture(), iteration), scene.model_path + "/chkpnt" + str(iteration) + ".pth")
 
 def prepare_output_and_logger(args):    
@@ -229,10 +237,12 @@ def prepare_output_and_logger(args):
         print("Tensorboard not available: not logging progress")
     return tb_writer
 
-def training_report(tb_writer, iteration, Ll1, loss, l1_loss, elapsed, testing_iterations, scene: Scene, renderFunc, renderArgs, train_test_exp):
+def training_report(tb_writer, iteration, Ll1, loss, l1_loss, elapsed, testing_iterations, scene: Scene, renderFunc, renderArgs, train_test_exp, ssim_value):
     if tb_writer:
         tb_writer.add_scalar('train_loss_patches/l1_loss', Ll1.item(), iteration)
         tb_writer.add_scalar('train_loss_patches/total_loss', loss.item(), iteration)
+        # Log SSIM vào TensorBoard
+        tb_writer.add_scalar('train_loss_patches/ssim', ssim_value.item(), iteration)
         tb_writer.add_scalar('iter_time', elapsed, iteration)
 
     # Report test and training samples
@@ -245,6 +255,7 @@ def training_report(tb_writer, iteration, Ll1, loss, l1_loss, elapsed, testing_i
             if config['cameras'] and len(config['cameras']) > 0:
                 l1_test = 0.0
                 psnr_test = 0.0
+                ssim_test_total = 0.0
                 for idx, viewpoint in enumerate(config['cameras']):
                     image = torch.clamp(renderFunc(viewpoint, scene.gaussians, *renderArgs)["render"], 0.0, 1.0)
                     gt_image = torch.clamp(viewpoint.original_image.to("cuda"), 0.0, 1.0)
@@ -257,12 +268,20 @@ def training_report(tb_writer, iteration, Ll1, loss, l1_loss, elapsed, testing_i
                             tb_writer.add_images(config['name'] + "_view_{}/ground_truth".format(viewpoint.image_name), gt_image[None], global_step=iteration)
                     l1_test += l1_loss(image, gt_image).mean().double()
                     psnr_test += psnr(image, gt_image).mean().double()
+                    # Tính SSIM cho từng camera
+                    if FUSED_SSIM_AVAILABLE:
+                        ssim_value_val = fused_ssim(image.unsqueeze(0), gt_image.unsqueeze(0))
+                    else:
+                        ssim_value_val = ssim(image, gt_image)
+                    ssim_test_total += ssim_value_val.item() if hasattr(ssim_value_val, 'item') else ssim_value_val
                 psnr_test /= len(config['cameras'])
-                l1_test /= len(config['cameras'])          
-                print("\n[ITER {}] Evaluating {}: L1 {} PSNR {}".format(iteration, config['name'], l1_test, psnr_test))
+                l1_test /= len(config['cameras'])  
+                ssim_test = ssim_test_total / len(config['cameras'])
+                print("[ITER {}] Evaluating {}: L1 {} PSNR {} SSIM {:.4f}".format(iteration, config['name'], l1_test, psnr_test, ssim_test))
                 if tb_writer:
                     tb_writer.add_scalar(config['name'] + '/loss_viewpoint - l1_loss', l1_test, iteration)
                     tb_writer.add_scalar(config['name'] + '/loss_viewpoint - psnr', psnr_test, iteration)
+                    tb_writer.add_scalar(config['name'] + '/loss_viewpoint - ssim', ssim_test, iteration)
 
         if tb_writer:
             tb_writer.add_histogram("scene/opacity_histogram", scene.gaussians.get_opacity, iteration)
@@ -300,4 +319,4 @@ if __name__ == "__main__":
     training(lp.extract(args), op.extract(args), pp.extract(args), args.test_iterations, args.save_iterations, args.checkpoint_iterations, args.start_checkpoint, args.debug_from)
 
     # All done
-    print("\nTraining complete.")
+    print("Training complete.")
